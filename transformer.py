@@ -2,16 +2,19 @@ import glob, os
 import tensorflow as tf
 from keras import optimizers
 import numpy as np
+from tensorflow.keras.layers import Dense, Embedding, LayerNormalization
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.preprocessing.text import Tokenizer
 
 
 class SelfAttention:
-    def __init__(self, inp, emb_size, num_tokens, num_head, mask=None):
+    def __init__(self, inp, emb_size, num_tokens, num_heads, mask=None):
         #make sure the shape is [batch, token, embedding]
     
-        self.queries = Dense(emb_size * num_head)(inp)
-        self.keys = Dense(emb_size * num_head)(inp)
-        self.values = Dense(emb_size * num_head)(inp)
-        #shape should be [batch, token, embedding * num_head]
+        self.queries = Dense(emb_size * num_heads)(inp)
+        self.keys = Dense(emb_size * num_heads)(inp)
+        self.values = Dense(emb_size * num_heads)(inp)
+        #shape should be [batch, token, embedding * num_heads]
 
         _queries = tf.reshape(self.queries, [-1, num_tokens, emb_size, num_heads])
         _queries = tf.transpose(_queries, [0, 3, 1, 2])
@@ -26,34 +29,34 @@ class SelfAttention:
         _values = tf.transpose(_values, [-1, 3, 1, 2])
         _values = tf.reshape(_values, [-1, num_tokens, emb_size])
 
-        compatability = tf.matmul(transposed_queries, transposed_keys)
-        scaled_compat = tf.div(compatability, tf.sqrt(emb_size))
+        #batch*head, num_tokens, emb_size * batch*head, emb_size, num_token]
+        compatability = tf.matmul(_queries, _keys)
+        scaled_compat = tf.div(compatability, tf.sqrt(tf.cast(emb_size, tf.float32)))
 
         if mask:
             scaled_compat -= (mask * 1e9)
         
-        softmaxed_compat = tf.softmax(scaled_compat, axis=-1)
+        softmaxed_compat = tf.nn.softmax(scaled_compat, axis=-1)
         #[batch * head, emb_size, emb_size
 
-        weighted_values = tf.matmul(_values, softmaxed_compat)
-        weighted_values = reshape(weighted_values, [-1, num_head, emb_size, emb_size])
+
+        
+        weighted_values = tf.matmul(softmaxed_compat, _values)
+        weighted_values = tf.reshape(weighted_values, [-1, num_heads, emb_size, num_tokens])
         weighted_values = tf.transpose(weighted_values, [0, 2, 3, 1])
-        weighted_values = reshape(weighted_values, [-1, emb_size, emb_size * num_heads])
+        weighted_values = tf.reshape(weighted_values, [-1, num_tokens, emb_size * num_heads])
 
-        #size should be [batch, num_tokens]
-        #mabe mask here
 
-        unified_values = Dense(emb_size)(weighted_values) 
-        return unified_values
+        self.unified_values = Dense(emb_size)(weighted_values) 
 
 class Transformer:
-    def __init__(self, inp, emb_size, num_tokens, num_head, mlp_multiplier=4, mask=None):
+    def __init__(self, inp, emb_size, num_tokens, num_heads, mlp_multiplier=4, mask=None):
         
-        attentioned = SelfAttention(inp, emb_size, num_tokens, num_head, mask=None)
+        attentioned = SelfAttention(inp, emb_size, num_tokens, num_heads, mask=None).unified_values
         summed = inp + attentioned
         normed = LayerNormalization(epsilon=1e-6)(summed)
         mlp_residual = normed + self.smallMLP(normed, emb_size, mlp_multiplier)
-        return LayerNormalization(epsilon=1e-6)(mlp_residual)
+        self.out = LayerNormalization(epsilon=1e-6)(mlp_residual)
 
     def smallMLP(self, x, emb_size, multiplier):
         x = Dense(emb_size * multiplier, activation=tf.nn.ReLU)(x)
@@ -62,10 +65,9 @@ class Transformer:
         return Dense(emb_size, activation=tf.nn.ReLU)(x)
 
 class SentimentClassifier:
-    def __init__(self, vocab_size, emb_size, num_tokens, num_head, batch_size=25 mlp_multiplier=4):
+    def __init__(self, vocab_size, emb_size, num_tokens, num_heads, batch_size=25, mlp_multiplier=4):
         self.load_data(vocab_size, num_tokens)
 
-        self.tokenizer.fit_on_texts(self.train_pos + self.train_neg)
         self.createModel(vocab_size, emb_size, num_tokens, num_heads, mlp_multiplier)
 
     def load_data(self, vocab_size, maxlen):
@@ -79,11 +81,11 @@ class SentimentClassifier:
             lower = True,
             oov_token = 'unk'
         )
-
-        self.train_pos = np.array(pad_sequence(self.tokenizer.texts_to_sequences(train_pos), maxlen))
-        self.train_neg = np.array(pad_sequence(self.tokenizer.texts_to_sequences(train_neg), maxlen))
-        self.test_pos =  np.array(pad_sequence(self.tokenizer.texts_to_sequences(test_pos),  maxlen))
-        self.test_neg =  np.array(pad_sequence(self.tokenizer.texts_to_sequences(test_neg),  maxlen))
+        self.tokenizer.fit_on_texts(train_pos + train_neg)
+        self.train_pos = np.array(pad_sequences(self.tokenizer.texts_to_sequences(train_pos), maxlen))
+        self.train_neg = np.array(pad_sequences(self.tokenizer.texts_to_sequences(train_neg), maxlen))
+        self.test_pos =  np.array(pad_sequences(self.tokenizer.texts_to_sequences(test_pos),  maxlen))
+        self.test_neg =  np.array(pad_sequences(self.tokenizer.texts_to_sequences(test_neg),  maxlen))
 
     def get_batch(self, batch_size):
         #assuming we have equal numebr of pos and neg
@@ -92,16 +94,19 @@ class SentimentClassifier:
         pos_indices = np.random.randint(0, len(self.train_pos), num_pos) 
         neg_indices = np.random.randint(0, len(self.train_pos), num_neg) 
         
-        data = np.concatenate((self.train_pos[pos_indices], self.train_neg[neg_indices])
+        data = np.concatenate((self.train_pos[pos_indices], self.train_neg[neg_indices]))
         targets = np.array([[1.0, 0.0]] * num_pos + [[0.0, 1.0]] * num_neg)
 
         return data, targets
 
     def load_dir(self, dirpath):
         ret = []
+        x = 0
         for filename in glob.glob(dirpath + "*.txt"):
-            with open(file, 'r') as fh:
+            with open(filename, 'r') as fh:
                 ret.append(fh.read())
+            x += 1
+        print(x)
         return ret
     
     def positionalEncoding(self, num_tokens, emb_size):
@@ -117,7 +122,7 @@ class SentimentClassifier:
         return tf.cast(angles, dtype=tf.float32)
         
     def getAngles(self, pos, i, emb_dim):
-        return pos / (np.power(10000, (2 * (i//2)) / np.float32(emb_dim))
+        return pos / (np.power(10000, (2 * (i//2)) / np.float32(emb_dim)))
     
     def padMask(self, tokens, pad_value=0):
         #assume 0 are padding and every other token is positive
@@ -125,20 +130,20 @@ class SentimentClassifier:
         pad_mask[tokens == pad_value] = 1
         return pad_mask
 
-    def createModel(self, vocab_size, emb_size, num_tokens, num_head, mlp_multiplier=4):
+    def createModel(self, vocab_size, emb_size, num_tokens, num_heads, mlp_multiplier=4):
         embedding = Embedding(vocab_size, emb_size, input_length = num_tokens)
         positional_encoding = self.positionalEncoding(num_tokens, emb_size)
 
         self.input_ph = tf.placeholder(np.int64, shape=[None, num_tokens], name="token_indexes_ph")
         self.pad_mask_ph = tf.placeholder(np.float32, shape=[None, num_tokens], name="pad_mask_ph")
         self.target_ph = tf.placeholder(np.float32, shape=[None, 2], name="target_ph")
-        input = tf.convert_to_tensor(self.input)
+        input = tf.convert_to_tensor(self.input_ph)
         target = tf.convert_to_tensor(self.target_ph)
         embedding = embedding(input) + positional_encoding
         
-        t1 = Transformer(embedding, emb_size, num_tokens, num_head, self.pad_mask_ph)
-        t2 = Transformer(t1, emb_size, num_tokens, num_head)
-        t3 = Transformer(t2, emb_size, num_tokens, num_head)
+        t1 = Transformer(embedding, emb_size, num_tokens, num_heads, self.pad_mask_ph).out
+        t2 = Transformer(t1, emb_size, num_tokens, num_heads).out
+        t3 = Transformer(t2, emb_size, num_tokens, num_heads).out
         avg = tf.mean(t3, axis=-1)
         self.prediction = Dense(2, activation=tf.nn.softmax)(avg)
         
@@ -146,7 +151,7 @@ class SentimentClassifier:
         self.train_op = tf.train.AdamOptimizer(1e-4).minimize(self.loss)
 
     def batchTrain(self, sess, batch_size=25):
-        batch_data, batch_taget = self.get_batch(batch_size):
+        batch_data, batch_taget = self.get_batch(batch_size)
         pad_mask = self.padMask(batch_data)
         sess.run(
             [self.train_op, self.loss],
@@ -157,7 +162,7 @@ class SentimentClassifier:
             }
         )
 
-def Generator:
+class Generator:
     def positionalEncoding(self, num_tokens, emb_size):
         angles = self.getAngles(
             np.arange(num_tokens)[:, None],
@@ -171,12 +176,12 @@ def Generator:
         return tf.cast(angles, dtype=tf.float32)
         
     def getAngles(self, pos, i, emb_dim):
-        return pos / (np.power(10000, (2 * (i//2)) / np.float32(emb_dim))
+        return pos / (np.power(10000, (2 * (i//2)) / np.float32(emb_dim)))
          
         
     def upperTriangleMatrix(self, size):
         return 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
     
 
-SentimentClassifier(10000, 128, 512, 
-    def __init__(self, vocab_size, emb_size, num_tokens, num_head, batch_size=25 mlp_multiplier=4):
+sentiment_classifier = SentimentClassifier(10000, 128, 512, 8, 25, 4)
+
