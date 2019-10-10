@@ -1,71 +1,89 @@
 import glob, os
 import tensorflow as tf
-from keras import optimizers
 import numpy as np
 from tensorflow.keras.layers import Dense, Embedding, LayerNormalization
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras.preprocessing.text import Tokenizer
 
 
-class SelfAttention:
-    def __init__(self, inp, emb_size, num_tokens, num_heads, mask=None):
+class SelfAttention(tf.keras.layers.Layer):
+    def __init__(self, emb_size, num_heads, num_tokens):
         #make sure the shape is [batch, token, embedding]
-    
-        self.queries = Dense(emb_size * num_heads)(inp)
-        self.keys = Dense(emb_size * num_heads)(inp)
-        self.values = Dense(emb_size * num_heads)(inp)
+        super(SelfAttention, self).__init__()
+        self.num_tokens = num_tokens
+        self.emb_size = emb_size
+        self.num_heads = num_heads
+
+        self.queries_dense = Dense(emb_size * num_heads, use_bias = False)
+        self.keys_dense = Dense(emb_size * num_heads, use_bias = False)
+        self.values_dense = Dense(emb_size * num_heads, use_bias = False)
+        self.unify_dense = Dense(emb_size)
         #shape should be [batch, token, embedding * num_heads]
 
-        _queries = tf.reshape(self.queries, [-1, num_tokens, emb_size, num_heads])
+    def call(self, inp, mask=None):
+        q = self.queries_dense(inp)
+        k = self.keys_dense(inp)
+        v = self.values_dense(inp)
+        return self.unify_dense(self.getScaledValues(q, k, v, mask))
+
+    def getScaledValues(self, queries, keys, values, mask):
+
+        _queries = tf.reshape(queries, [-1, self.num_tokens, self.emb_size, self.num_heads])
         _queries = tf.transpose(_queries, [0, 3, 1, 2])
-        _queries = tf.reshape(_queries, [-1, num_tokens, emb_size])
+        #_queries = tf.reshape(_queries, [-1, self.num_tokens, self.emb_size])
 
 
-        _keys = tf.reshape(self.keys, [-1, num_tokens, emb_size, num_heads])
+        _keys = tf.reshape(keys, [-1, self.num_tokens, self.emb_size, self.num_heads])
         _keys = tf.transpose(_keys, [0, 3, 2, 1])
-        _keys = tf.reshape(_keys, [-1, emb_size, num_tokens])
+        #_keys = tf.reshape(_keys, [-1, self.emb_size, self.num_tokens])
 
-        _values = tf.reshape(self.values, [-1, num_tokens, emb_size, num_heads])
-        _values = tf.transpose(_values, [-1, 3, 1, 2])
-        _values = tf.reshape(_values, [-1, num_tokens, emb_size])
+        _values = tf.reshape(values, [-1, self.num_tokens, self.emb_size, self.num_heads])
+        _values = tf.transpose(_values, [0, 3, 1, 2])
+        #_values = tf.reshape(_values, [-1, self.num_tokens, self.emb_size])
 
         #batch*head, num_tokens, emb_size * batch*head, emb_size, num_token]
         compatability = tf.matmul(_queries, _keys)
-        scaled_compat = tf.div(compatability, tf.sqrt(tf.cast(emb_size, tf.float32)))
+        scaled_compat = tf.divide(compatability, tf.sqrt(tf.cast(self.emb_size, tf.float32)))
 
-        if mask:
+        if mask is not None:
             scaled_compat -= (mask * 1e9)
         
         softmaxed_compat = tf.nn.softmax(scaled_compat, axis=-1)
         #[batch * head, emb_size, emb_size
 
-
-        
         weighted_values = tf.matmul(softmaxed_compat, _values)
-        weighted_values = tf.reshape(weighted_values, [-1, num_heads, emb_size, num_tokens])
+        weighted_values = tf.reshape(weighted_values, [-1, self.num_heads, self.emb_size, self.num_tokens])
         weighted_values = tf.transpose(weighted_values, [0, 2, 3, 1])
-        weighted_values = tf.reshape(weighted_values, [-1, num_tokens, emb_size * num_heads])
+        weighted_values = tf.reshape(weighted_values, [-1, self.num_tokens, self.emb_size * self.num_heads])
 
+        return weighted_values
 
-        self.unified_values = Dense(emb_size)(weighted_values) 
-
-class Transformer:
-    def __init__(self, inp, emb_size, num_tokens, num_heads, mlp_multiplier=4, mask=None):
+class Transformer(tf.keras.layers.Layer):
+    def __init__(self, emb_size, num_tokens, num_heads, mlp_multiplier=4):
+        super(Transformer, self).__init__()
+        self.attention = SelfAttention(emb_size, num_heads, num_tokens)
         
-        attentioned = SelfAttention(inp, emb_size, num_tokens, num_heads, mask=None).unified_values
-        summed = inp + attentioned
+        self.mlpDense1 = Dense(emb_size * mlp_multiplier, activation=tf.nn.relu)
+        self.mlpDense2 = Dense(emb_size * mlp_multiplier, activation=tf.nn.relu)
+        self.mlpDense3 = Dense(emb_size * mlp_multiplier, activation=tf.nn.relu)
+        self.mlpDense4 = Dense(emb_size, activation=tf.nn.relu)
+       
+    def call(self, inp, mask=None):
+        unified_values = self.attention(inp, mask)
+        summed = inp + unified_values
         normed = LayerNormalization(epsilon=1e-6)(summed)
-        mlp_residual = normed + self.smallMLP(normed, emb_size, mlp_multiplier)
-        self.out = LayerNormalization(epsilon=1e-6)(mlp_residual)
+        mlp_residual = normed + self.mlp(normed)
+        return LayerNormalization(epsilon=1e-6)(mlp_residual)
 
-    def smallMLP(self, x, emb_size, multiplier):
-        x = Dense(emb_size * multiplier, activation=tf.nn.ReLU)(x)
-        x = Dense(emb_size * multiplier, activation=tf.nn.ReLU)(x)
-        x = Dense(emb_size * multiplier, activation=tf.nn.ReLU)(x)
-        return Dense(emb_size, activation=tf.nn.ReLU)(x)
+    def mlp(self, x):
+        x = self.mlpDense1(x)
+        x = self.mlpDense2(x)
+        x = self.mlpDense3(x)
+        return self.mlpDense4(x)
 
-class SentimentClassifier:
+class SentimentClassifier(tf.keras.Model):
     def __init__(self, vocab_size, emb_size, num_tokens, num_heads, batch_size=25, mlp_multiplier=4):
+        super(SentimentClassifier, self).__init__()
         self.load_data(vocab_size, num_tokens)
 
         self.createModel(vocab_size, emb_size, num_tokens, num_heads, mlp_multiplier)
@@ -101,12 +119,9 @@ class SentimentClassifier:
 
     def load_dir(self, dirpath):
         ret = []
-        x = 0
         for filename in glob.glob(dirpath + "*.txt"):
             with open(filename, 'r') as fh:
                 ret.append(fh.read())
-            x += 1
-        print(x)
         return ret
     
     def positionalEncoding(self, num_tokens, emb_size):
@@ -128,39 +143,41 @@ class SentimentClassifier:
         #assume 0 are padding and every other token is positive
         pad_mask = np.zeros(tokens.shape)
         pad_mask[tokens == pad_value] = 1
-        return pad_mask
+        return pad_mask[:, None, None, :]
+
+    def getLoss(self, inp, pad_mask, target):
+        prediction = self.infer(inp, pad_mask) 
+        loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=target, logits=prediction))
+        return prediction, loss
+
+    def infer(self, inp, pad_mask):
+        combined_input = self.embedding(inp) + self.positional_encoding
+        x = self.t1(combined_input, pad_mask)
+        x = self.t2(x)
+        x = self.t3(x)
+        avg = tf.reduce_mean(x, axis=-1)
+        prediction = self.class_dense(avg)
+        return prediction
 
     def createModel(self, vocab_size, emb_size, num_tokens, num_heads, mlp_multiplier=4):
-        embedding = Embedding(vocab_size, emb_size, input_length = num_tokens)
-        positional_encoding = self.positionalEncoding(num_tokens, emb_size)
-
-        self.input_ph = tf.placeholder(np.int64, shape=[None, num_tokens], name="token_indexes_ph")
-        self.pad_mask_ph = tf.placeholder(np.float32, shape=[None, num_tokens], name="pad_mask_ph")
-        self.target_ph = tf.placeholder(np.float32, shape=[None, 2], name="target_ph")
-        input = tf.convert_to_tensor(self.input_ph)
-        target = tf.convert_to_tensor(self.target_ph)
-        embedding = embedding(input) + positional_encoding
+        self.embedding = Embedding(vocab_size, emb_size, input_length = num_tokens)
+        self.positional_encoding = self.positionalEncoding(num_tokens, emb_size)
         
-        t1 = Transformer(embedding, emb_size, num_tokens, num_heads, self.pad_mask_ph).out
-        t2 = Transformer(t1, emb_size, num_tokens, num_heads).out
-        t3 = Transformer(t2, emb_size, num_tokens, num_heads).out
-        avg = tf.mean(t3, axis=-1)
-        self.prediction = Dense(2, activation=tf.nn.softmax)(avg)
+        self.class_dense = Dense(2, activation=tf.nn.softmax)
         
-        self.loss = tf.nn.softmax_cross_entropy_with_logits_v2(labels=target, logits=self.prediction)
-        self.train_op = tf.train.AdamOptimizer(1e-4).minimize(self.loss)
-
-    def batchTrain(self, sess, batch_size=25):
-        batch_data, batch_taget = self.get_batch(batch_size)
+        self.t1 = Transformer(emb_size, num_tokens, num_heads)
+        self.t2 = Transformer(emb_size, num_tokens, num_heads)
+        self.t3 = Transformer(emb_size, num_tokens, num_heads)
+        
+    #def batchTrain(self, optimizer, batch_size=25):
+    #    batch_data, batch_taget = self.get_batch(batch_size)
+    #    pad_mask = self.padMask(batch_data)
+    #    prediction, loss = self.getLoss(batch_data, pad_mask, batch_target)
+    #    #optimizer.minimize(loss, )
+    def batchTrain(self, batch_size=25):
+        batch_data, batch_target = self.get_batch(batch_size)
         pad_mask = self.padMask(batch_data)
-        sess.run(
-            [self.train_op, self.loss],
-            feed_dict = {
-                self.input_ph: batch_data,
-                self.pad_mask_ph: pad_mask,
-                self.target_ph: batch_target
-            }
-        )
+        return self.getLoss(batch_data, pad_mask, batch_target) #prediction, loss
 
 class Generator:
     def positionalEncoding(self, num_tokens, emb_size):
@@ -181,7 +198,20 @@ class Generator:
         
     def upperTriangleMatrix(self, size):
         return 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
-    
 
+
+optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
+epoch = 0
 sentiment_classifier = SentimentClassifier(10000, 128, 512, 8, 25, 4)
-
+while epoch < 1000000:
+    with tf.GradientTape() as tape:
+        prediction, loss = sentiment_classifier.batchTrain()
+    print("epoch", epoch)
+    print("prediction", prediction[0])
+    print("loss", loss)
+    
+    gradients = tape.gradient(loss, sentiment_classifier.trainable_variables)
+    optimizer.apply_gradients(zip(gradients, sentiment_classifier.trainable_variables))
+    epoch += 1
+        
+        #print("trainable2", sentiment_classifier.trainable_variables)
