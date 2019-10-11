@@ -29,16 +29,13 @@ class SelfAttention(tf.keras.layers.Layer):
 
         _queries = tf.reshape(queries, [-1, self.num_tokens, self.emb_size, self.num_heads])
         _queries = tf.transpose(_queries, [0, 3, 1, 2])
-        #_queries = tf.reshape(_queries, [-1, self.num_tokens, self.emb_size])
 
 
         _keys = tf.reshape(keys, [-1, self.num_tokens, self.emb_size, self.num_heads])
         _keys = tf.transpose(_keys, [0, 3, 2, 1])
-        #_keys = tf.reshape(_keys, [-1, self.emb_size, self.num_tokens])
 
         _values = tf.reshape(values, [-1, self.num_tokens, self.emb_size, self.num_heads])
         _values = tf.transpose(_values, [0, 3, 1, 2])
-        #_values = tf.reshape(_values, [-1, self.num_tokens, self.emb_size])
 
         #batch*head, num_tokens, emb_size * batch*head, emb_size, num_token]
         compatability = tf.matmul(_queries, _keys)
@@ -224,4 +221,3 @@ while epoch < 1000000:
     optimizer.apply_gradients(zip(gradients, sentiment_classifier.trainable_variables))
     epoch += 1
         
-        #print("trainable2", sentiment_classifier.trainable_variables)
