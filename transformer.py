@@ -5,7 +5,6 @@ from tensorflow.keras.layers import Dense, Embedding, LayerNormalization
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras.preprocessing.text import Tokenizer
 
-
 class SelfAttention(tf.keras.layers.Layer):
     def __init__(self, emb_size, num_heads, num_tokens):
         #make sure the shape is [batch, token, embedding]
@@ -43,17 +42,21 @@ class SelfAttention(tf.keras.layers.Layer):
 
         #batch*head, num_tokens, emb_size * batch*head, emb_size, num_token]
         compatability = tf.matmul(_queries, _keys)
+        #[batch, head, num_tokens, num_tokens]
         scaled_compat = tf.divide(compatability, tf.sqrt(tf.cast(self.emb_size, tf.float32)))
 
         if mask is not None:
             scaled_compat -= (mask * 1e9)
         
         softmaxed_compat = tf.nn.softmax(scaled_compat, axis=-1)
-        #[batch * head, emb_size, emb_size
-
+        #shape = batch, num_head, emb_size, emb_size
+        
+        #[batch, head, token, token] * [batch, head, token, es]
+        #expected: batch, head, token, es
         weighted_values = tf.matmul(softmaxed_compat, _values)
-        weighted_values = tf.reshape(weighted_values, [-1, self.num_heads, self.emb_size, self.num_tokens])
+        #assert(weighted_values.shape[1:] == [self.num_heads, self.num_tokens, self.emb_size])
         weighted_values = tf.transpose(weighted_values, [0, 2, 3, 1])
+        #assert(weighted_values.shape[1:] == [self.num_tokens, self.emb_size, self.num_heads])
         weighted_values = tf.reshape(weighted_values, [-1, self.num_tokens, self.emb_size * self.num_heads])
 
         return weighted_values
@@ -62,11 +65,10 @@ class Transformer(tf.keras.layers.Layer):
     def __init__(self, emb_size, num_tokens, num_heads, mlp_multiplier=4):
         super(Transformer, self).__init__()
         self.attention = SelfAttention(emb_size, num_heads, num_tokens)
-        
         self.mlpDense1 = Dense(emb_size * mlp_multiplier, activation=tf.nn.relu)
-        self.mlpDense2 = Dense(emb_size * mlp_multiplier, activation=tf.nn.relu)
-        self.mlpDense3 = Dense(emb_size * mlp_multiplier, activation=tf.nn.relu)
-        self.mlpDense4 = Dense(emb_size, activation=tf.nn.relu)
+        #self.mlpDense2 = Dense(emb_size * mlp_multiplier, activation=tf.nn.relu)
+        #self.mlpDense3 = Dense(emb_size * mlp_multiplier, activation=tf.nn.relu)
+        self.mlpDense4 = Dense(emb_size, activation=None)
        
     def call(self, inp, mask=None):
         unified_values = self.attention(inp, mask)
@@ -77,8 +79,8 @@ class Transformer(tf.keras.layers.Layer):
 
     def mlp(self, x):
         x = self.mlpDense1(x)
-        x = self.mlpDense2(x)
-        x = self.mlpDense3(x)
+        #x = self.mlpDense2(x)
+        #x = self.mlpDense3(x)
         return self.mlpDense4(x)
 
 class SentimentClassifier(tf.keras.Model):
@@ -169,12 +171,7 @@ class SentimentClassifier(tf.keras.Model):
         self.t2 = Transformer(emb_size, num_tokens, num_heads)
         self.t3 = Transformer(emb_size, num_tokens, num_heads)
         
-    #def batchTrain(self, optimizer, batch_size=25):
-    #    batch_data, batch_taget = self.get_batch(batch_size)
-    #    pad_mask = self.padMask(batch_data)
-    #    prediction, loss = self.getLoss(batch_data, pad_mask, batch_target)
-    #    #optimizer.minimize(loss, )
-    def batchTrain(self, batch_size=25):
+    def getBatchLoss(self, batch_size=25):
         batch_data, batch_target = self.get_batch(batch_size)
         pad_mask = self.padMask(batch_data)
         return self.getLoss(batch_data, pad_mask, batch_target) #prediction, loss
@@ -205,7 +202,7 @@ epoch = 0
 sentiment_classifier = SentimentClassifier(10000, 128, 512, 8, 25, 4)
 while epoch < 1000000:
     with tf.GradientTape() as tape:
-        prediction, loss = sentiment_classifier.batchTrain()
+        prediction, loss = sentiment_classifier.getBatchLoss()
     print("epoch", epoch)
     print("prediction", prediction[0])
     print("loss", loss)
