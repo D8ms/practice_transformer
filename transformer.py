@@ -107,12 +107,24 @@ class SentimentClassifier(tf.keras.Model):
         self.test_pos =  np.array(pad_sequences(self.tokenizer.texts_to_sequences(test_pos),  maxlen))
         self.test_neg =  np.array(pad_sequences(self.tokenizer.texts_to_sequences(test_neg),  maxlen))
 
-    def get_batch(self, batch_size):
+    def getBatchData(self, batch_size):
         #assuming we have equal numebr of pos and neg
         num_pos = np.random.randint(1, batch_size)
         num_neg = batch_size - num_pos
         pos_indices = np.random.randint(0, len(self.train_pos), num_pos) 
         neg_indices = np.random.randint(0, len(self.train_pos), num_neg) 
+        
+        data = np.concatenate((self.train_pos[pos_indices], self.train_neg[neg_indices]))
+        targets = np.array([[1.0, 0.0]] * num_pos + [[0.0, 1.0]] * num_neg)
+
+        return data, targets
+    
+    def getRiggedBatchData(self, batch_size):
+        #assuming we have equal numebr of pos and neg
+        num_pos = batch_size // 2
+        num_neg = batch_size - num_pos
+        pos_indices = np.arange(num_pos) 
+        neg_indices = np.arange(num_neg)
         
         data = np.concatenate((self.train_pos[pos_indices], self.train_neg[neg_indices]))
         targets = np.array([[1.0, 0.0]] * num_pos + [[0.0, 1.0]] * num_neg)
@@ -157,22 +169,24 @@ class SentimentClassifier(tf.keras.Model):
         x = self.t1(combined_input, pad_mask)
         x = self.t2(x)
         x = self.t3(x)
-        avg = tf.reduce_mean(x, axis=-1)
+        
+        avg = tf.reduce_mean(x, axis=1)
         prediction = self.class_dense(avg)
+
         return prediction
 
     def createModel(self, vocab_size, emb_size, num_tokens, num_heads, mlp_multiplier=4):
         self.embedding = Embedding(vocab_size, emb_size, input_length = num_tokens)
         self.positional_encoding = self.positionalEncoding(num_tokens, emb_size)
         
-        self.class_dense = Dense(2, activation=tf.nn.softmax)
+        self.class_dense = Dense(2)
         
         self.t1 = Transformer(emb_size, num_tokens, num_heads)
         self.t2 = Transformer(emb_size, num_tokens, num_heads)
         self.t3 = Transformer(emb_size, num_tokens, num_heads)
         
     def getBatchLoss(self, batch_size=25):
-        batch_data, batch_target = self.get_batch(batch_size)
+        batch_data, batch_target = self.getBatchData(batch_size)
         pad_mask = self.padMask(batch_data)
         return self.getLoss(batch_data, pad_mask, batch_target) #prediction, loss
 
@@ -204,7 +218,6 @@ while epoch < 1000000:
     with tf.GradientTape() as tape:
         prediction, loss = sentiment_classifier.getBatchLoss()
     print("epoch", epoch)
-    print("prediction", prediction[0])
     print("loss", loss)
     
     gradients = tape.gradient(loss, sentiment_classifier.trainable_variables)
